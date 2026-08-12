@@ -1,0 +1,110 @@
+{
+  "name": "Workflow A - Kill Switch API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "kill-switch",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1-webhook",
+      "name": "Kill Switch Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "kill-switch-api"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst action = (body.action || '').toLowerCase();\nconst actor = (body.actor || '').trim();\nconst reason = (body.reason || '').trim();\n\nif (!['freeze', 'unfreeze'].includes(action)) {\n  throw new Error('action must be \"freeze\" or \"unfreeze\"');\n}\nif (!actor) {\n  throw new Error('actor is required so the emergency action is auditable (see ADR-004)');\n}\n\nreturn [{\n  json: {\n    action,\n    actor,\n    reason: reason || (action === 'freeze' ? 'Manual emergency stop' : 'Manual restore'),\n    is_frozen: action === 'freeze',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "a2-validate",
+      "name": "Validate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": "public",
+        "table": "policies",
+        "updateKey": "id",
+        "columns": "is_frozen, updated_at",
+        "additionalFields": {}
+      },
+      "id": "a3-update-policy",
+      "name": "Update policies.is_frozen",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [440, -80],
+      "credentials": {
+        "supabaseApi": {
+          "id": "SUPABASE_SERVICE_ROLE_CRED_ID",
+          "name": "Supabase Service Role"
+        }
+      },
+      "notes": "NOTE: this node targets the single existing policies row. In n8n, set 'id' filter to the known wallet row id (see setup-guide.md step 4) rather than hardcoding a value here."
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "a4-audit-log",
+      "name": "Insert Audit Log Row",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [440, 80],
+      "credentials": {
+        "supabaseApi": {
+          "id": "SUPABASE_SERVICE_ROLE_CRED_ID",
+          "name": "Supabase Service Role"
+        }
+      },
+      "notes": "Writes recipient='SYSTEM', amount=0, status='FROZEN'/'UNFROZEN', reason='actor: <actor> — <reason>'. See decisions.md ADR-005."
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('Validate Request').first().json;\nreturn [{\n  json: {\n    status: v.action === 'freeze' ? 'FROZEN' : 'UNFROZEN',\n    is_frozen: v.is_frozen,\n    actor: v.actor,\n    reason: v.reason,\n    timestamp: v.timestamp,\n    message: v.action === 'freeze'\n      ? '\ud83d\udea8 Emergency Stop Activated - All Payment Pipelines Halted'\n      : '\u2705 System restored - payment pipeline resumed'\n  }\n}];"
+      },
+      "id": "a5-format-response",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "a6-respond",
+      "name": "Respond to Dashboard",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "Kill Switch Webhook": { "main": [[{ "node": "Validate Request", "type": "main", "index": 0 }]] },
+    "Validate Request": {
+      "main": [[
+        { "node": "Update policies.is_frozen", "type": "main", "index": 0 },
+        { "node": "Insert Audit Log Row", "type": "main", "index": 0 }
+      ]]
+    },
+    "Update policies.is_frozen": { "main": [[{ "node": "Format Response", "type": "main", "index": 0 }]] },
+    "Insert Audit Log Row": { "main": [[{ "node": "Format Response", "type": "main", "index": 0 }]] },
+    "Format Response": { "main": [[{ "node": "Respond to Dashboard", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": {
+    "description": "Freezes/unfreezes the wallet by writing policies.is_frozen and logs an auditable SYSTEM event into transaction_logs. This is the ONLY workflow allowed to change is_frozen."
+  }
+}

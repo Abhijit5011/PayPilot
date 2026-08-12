@@ -1,0 +1,200 @@
+{
+  "name": "Workflow D - Payment Executor",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "recipient", "type": "string" },
+            { "name": "amount", "type": "number" },
+            { "name": "request_id", "type": "string" },
+            { "name": "policy_id", "type": "string" }
+          ]
+        }
+      },
+      "id": "d1-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "notes": "Only Workflow C's 'Execute Workflow D' node points here. No public webhook exists for this workflow - see architecture.md section 6."
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "schema": "public",
+        "table": "transaction_logs",
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            { "keyName": "reason", "condition": "like", "keyValue": "={{ '%' + $json.request_id + '%' }}" },
+            { "keyName": "status", "condition": "eq", "keyValue": "EXECUTED" }
+          ]
+        }
+      },
+      "id": "d2-idempotency-check",
+      "name": "Idempotency Check (already executed?)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } },
+      "notes": "Guards against a retried Execute Workflow call double-charging Stripe for the same request_id. See decisions.md ADR-007."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.length }}", "rightValue": 0, "operator": { "type": "number", "operation": "equals" } }
+          ]
+        }
+      },
+      "id": "d3-if-not-already-executed",
+      "name": "IF Not Already Executed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "schema": "public",
+        "table": "policies",
+        "returnAll": false,
+        "limit": 1
+      },
+      "id": "d4-read-policy-checkpoint4",
+      "name": "Re-read Policy (checkpoint 4)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [660, -80],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } },
+      "notes": "Last possible checkpoint before an irreversible external side effect (calling Stripe). See architecture.md section 5, row 4."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.is_frozen }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }
+          ]
+        }
+      },
+      "id": "d5-if-frozen-checkpoint4",
+      "name": "IF Frozen (checkpoint 4)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [880, -80]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.stripe.com/v1/payment_intents",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "stripeApi",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "amount", "value": "={{ Math.round($('Execute Workflow Trigger').item.json.amount * 100) }}" },
+            { "name": "currency", "value": "usd" },
+            { "name": "confirm", "value": "true" },
+            { "name": "payment_method", "value": "pm_card_visa" },
+            { "name": "description", "value": "={{ 'Kill-switch demo payment to ' + $('Execute Workflow Trigger').item.json.recipient }}" },
+            { "name": "metadata[request_id]", "value": "={{ $('Execute Workflow Trigger').item.json.request_id }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d6-stripe-create-intent",
+      "name": "Stripe: Create PaymentIntent (TEST MODE)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -160],
+      "credentials": { "stripeApi": { "id": "STRIPE_TEST_CRED_ID", "name": "Stripe Test Mode" } },
+      "notes": "Requires the Stripe TEST secret key credential in n8n. pm_card_visa is Stripe's built-in test payment method - no real card data involved."
+    },
+    {
+      "parameters": {
+        "jsCode": "const stripe = $input.first().json;\nconst trig = $('Execute Workflow Trigger').first().json;\nreturn [{\n  json: {\n    decision_input: 'executed',\n    status: stripe.status === 'succeeded' ? 'EXECUTED' : 'FAILED',\n    payment_id: stripe.id,\n    stripe_status: stripe.status,\n    timestamp: new Date().toISOString(),\n    recipient: trig.recipient,\n    amount: trig.amount,\n    request_id: trig.request_id\n  }\n}];"
+      },
+      "id": "d7-format-stripe-result",
+      "name": "Format Stripe Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -160]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "d8-log-result",
+      "name": "Log EXECUTED/FAILED",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1540, -160],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const trig = $('Execute Workflow Trigger').first().json;\nreturn [{ json: { status: 'FAILED', reason: 'Blocked by Emergency Kill Switch immediately before Stripe call.', recipient: trig.recipient, amount: trig.amount, request_id: trig.request_id, timestamp: new Date().toISOString() } }];"
+      },
+      "id": "d9-format-frozen-reject",
+      "name": "Format Frozen Rejection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 60]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "d10-log-frozen-reject",
+      "name": "Log FAILED (frozen)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, 60],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const existing = $input.first().json;\nreturn [{ json: { status: 'FAILED', reason: 'Duplicate request - already executed as ' + existing.status + ' (idempotency guard).', payment_id: null, timestamp: new Date().toISOString(), recipient: $('Execute Workflow Trigger').first().json.recipient, amount: $('Execute Workflow Trigger').first().json.amount } }];"
+      },
+      "id": "d11-format-duplicate",
+      "name": "Format Duplicate Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 180]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": { "main": [[{ "node": "Idempotency Check (already executed?)", "type": "main", "index": 0 }]] },
+    "Idempotency Check (already executed?)": { "main": [[{ "node": "IF Not Already Executed", "type": "main", "index": 0 }]] },
+    "IF Not Already Executed": {
+      "main": [
+        [{ "node": "Re-read Policy (checkpoint 4)", "type": "main", "index": 0 }],
+        [{ "node": "Format Duplicate Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Re-read Policy (checkpoint 4)": { "main": [[{ "node": "IF Frozen (checkpoint 4)", "type": "main", "index": 0 }]] },
+    "IF Frozen (checkpoint 4)": {
+      "main": [
+        [{ "node": "Format Frozen Rejection", "type": "main", "index": 0 }],
+        [{ "node": "Stripe: Create PaymentIntent (TEST MODE)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Stripe: Create PaymentIntent (TEST MODE)": { "main": [[{ "node": "Format Stripe Result", "type": "main", "index": 0 }]] },
+    "Format Stripe Result": { "main": [[{ "node": "Log EXECUTED/FAILED", "type": "main", "index": 0 }]] },
+    "Format Frozen Rejection": { "main": [[{ "node": "Log FAILED (frozen)", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": {
+    "description": "The only workflow holding a Stripe key. Only reachable via Workflow C's Execute Workflow node (no public webhook - see architecture.md section 6). Re-checks is_frozen one final time immediately before calling Stripe."
+  }
+}

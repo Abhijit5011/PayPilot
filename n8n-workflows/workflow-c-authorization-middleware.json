@@ -1,0 +1,347 @@
+{
+  "name": "Workflow C - Authorization Middleware",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "recipient", "type": "string" },
+            { "name": "amount", "type": "number" },
+            { "name": "request_id", "type": "string" }
+          ]
+        }
+      },
+      "id": "c1-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "notes": "Only callable from another workflow's Execute Workflow node inside this n8n instance. Not a public webhook - see architecture.md section 6."
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst requestId = input.request_id || (Date.now() + '-' + Math.random().toString(36).slice(2));\nreturn [{ json: { recipient: input.recipient, amount: Number(input.amount), request_id: requestId } }];"
+      },
+      "id": "c2-normalize",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "schema": "public",
+        "table": "policies",
+        "returnAll": false,
+        "limit": 1
+      },
+      "id": "c3-read-policy-1",
+      "name": "Read Policy (checkpoint 2)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [440, 0],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "leftValue": "={{ $json.is_frozen }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "c4-if-frozen-1",
+      "name": "IF Frozen (checkpoint 2)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "schema": "public",
+        "table": "allowlist",
+        "returnAll": true,
+        "filters": { "conditions": [{ "keyName": "address", "condition": "eq", "keyValue": "={{ $('Normalize Input').item.json.recipient }}" }] }
+      },
+      "id": "c5-check-allowlist",
+      "name": "Check Allowlist",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, -120],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allowlistMatches = $input.all().map(i => i.json);\nconst policy = $('Read Policy (checkpoint 2)').first().json;\nconst normalized = $('Normalize Input').first().json;\n\nconst onAllowlist = allowlistMatches.length > 0;\nconst wouldExceed = (Number(policy.spent_today) + Number(normalized.amount)) > Number(policy.daily_limit);\n\nreturn [{\n  json: {\n    ...normalized,\n    on_allowlist: onAllowlist,\n    would_exceed_limit: wouldExceed,\n    daily_limit: policy.daily_limit,\n    spent_today: policy.spent_today,\n    policy_id: policy.id\n  }\n}];"
+      },
+      "id": "c6-evaluate-policy",
+      "name": "Evaluate Allowlist + Limit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "or",
+          "conditions": [
+            { "leftValue": "={{ $json.on_allowlist }}", "rightValue": false, "operator": { "type": "boolean", "operation": "equals" } },
+            { "leftValue": "={{ $json.would_exceed_limit }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equals" } }
+          ]
+        }
+      },
+      "id": "c7-if-fails-policy",
+      "name": "IF Fails Allowlist/Limit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1320, -120]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "schema": "public",
+        "table": "policies",
+        "returnAll": false,
+        "limit": 1
+      },
+      "id": "c8-read-policy-2",
+      "name": "Re-read Policy (checkpoint 3)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1540, -220],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } },
+      "notes": "Race-condition guard: owner may have hit Emergency Stop after checkpoint 2 but before we call the executor. See decisions.md ADR-003."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.is_frozen }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }
+          ]
+        }
+      },
+      "id": "c9-if-frozen-2",
+      "name": "IF Frozen (checkpoint 3)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1760, -220]
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ 'WORKFLOW_D_ID_PLACEHOLDER' }}",
+        "workflowInputs": {
+          "value": {
+            "recipient": "={{ $('Evaluate Allowlist + Limit').item.json.recipient }}",
+            "amount": "={{ $('Evaluate Allowlist + Limit').item.json.amount }}",
+            "request_id": "={{ $('Evaluate Allowlist + Limit').item.json.request_id }}",
+            "policy_id": "={{ $('Evaluate Allowlist + Limit').item.json.policy_id }}"
+          }
+        },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "id": "c10-call-workflow-d",
+      "name": "Execute Workflow D (Payment Executor)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1980, -220],
+      "notes": "The ONLY node anywhere in this project allowed to invoke Workflow D. Replace WORKFLOW_D_ID_PLACEHOLDER with the real workflow id after import - see setup-guide.md."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            { "leftValue": "={{ $json.status }}", "rightValue": "EXECUTED", "operator": { "type": "string", "operation": "equals" } }
+          ]
+        }
+      },
+      "id": "c11-if-executed",
+      "name": "IF Executor Succeeded",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2200, -220]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": "public",
+        "table": "policies",
+        "updateKey": "id",
+        "columns": "spent_today, updated_at"
+      },
+      "id": "c12-increment-spent",
+      "name": "Increment spent_today",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2420, -280],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "c13-log-approved",
+      "name": "Log APPROVED",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2640, -280],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "c14-log-frozen-2",
+      "name": "Log REJECTED (frozen at checkpoint 3)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1980, -60],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "c15-log-fails-policy",
+      "name": "Log REJECTED (allowlist/limit)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1540, 20],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "c16-log-frozen-1",
+      "name": "Log REJECTED (frozen at checkpoint 2)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 120],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "transaction_logs",
+        "columns": "recipient, amount, status, reason, created_at"
+      },
+      "id": "c17-log-executor-failed",
+      "name": "Log REJECTED (executor failed)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [2420, -160],
+      "credentials": { "supabaseApi": { "id": "SUPABASE_SERVICE_ROLE_CRED_ID", "name": "Supabase Service Role" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { decision: 'REJECTED', reason: 'Wallet is frozen. No new payments can be authorized until the owner unfreezes the system.', recipient: $('Normalize Input').first().json.recipient, amount: $('Normalize Input').first().json.amount } }];"
+      },
+      "id": "c18-format-reject-frozen1",
+      "name": "Format Rejection (frozen 2)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 260]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $('Evaluate Allowlist + Limit').first().json;\nconst reason = !e.on_allowlist ? 'Recipient is not on the allowlist.' : 'Payment would exceed the remaining daily limit.';\nreturn [{ json: { decision: 'REJECTED', reason, recipient: e.recipient, amount: e.amount } }];"
+      },
+      "id": "c19-format-reject-policy",
+      "name": "Format Rejection (allowlist/limit)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { decision: 'REJECTED', reason: 'Wallet was frozen after initial checks but before execution (kill switch race-guard triggered).', recipient: $('Normalize Input').first().json.recipient, amount: $('Normalize Input').first().json.amount } }];"
+      },
+      "id": "c20-format-reject-frozen2",
+      "name": "Format Rejection (frozen 3)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, -60]
+    },
+    {
+      "parameters": {
+        "jsCode": "const exec = $input.first().json;\nreturn [{ json: { decision: 'REJECTED', reason: exec.reason || 'Payment executor could not complete this payment.', recipient: exec.recipient, amount: exec.amount } }];"
+      },
+      "id": "c21-format-reject-executor",
+      "name": "Format Rejection (executor)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, -60]
+    },
+    {
+      "parameters": {
+        "jsCode": "const exec = $input.first().json;\nreturn [{ json: { decision: 'APPROVED', payment_id: exec.payment_id, status: exec.status, timestamp: exec.timestamp, recipient: exec.recipient, amount: exec.amount } }];"
+      },
+      "id": "c22-format-approved",
+      "name": "Format Approval",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2860, -280]
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": { "main": [[{ "node": "Normalize Input", "type": "main", "index": 0 }]] },
+    "Normalize Input": { "main": [[{ "node": "Read Policy (checkpoint 2)", "type": "main", "index": 0 }]] },
+    "Read Policy (checkpoint 2)": { "main": [[{ "node": "IF Frozen (checkpoint 2)", "type": "main", "index": 0 }]] },
+    "IF Frozen (checkpoint 2)": {
+      "main": [
+        [{ "node": "Log REJECTED (frozen at checkpoint 2)", "type": "main", "index": 0 }],
+        [{ "node": "Check Allowlist", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log REJECTED (frozen at checkpoint 2)": { "main": [[{ "node": "Format Rejection (frozen 2)", "type": "main", "index": 0 }]] },
+    "Check Allowlist": { "main": [[{ "node": "Evaluate Allowlist + Limit", "type": "main", "index": 0 }]] },
+    "Evaluate Allowlist + Limit": { "main": [[{ "node": "IF Fails Allowlist/Limit", "type": "main", "index": 0 }]] },
+    "IF Fails Allowlist/Limit": {
+      "main": [
+        [{ "node": "Log REJECTED (allowlist/limit)", "type": "main", "index": 0 }],
+        [{ "node": "Re-read Policy (checkpoint 3)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log REJECTED (allowlist/limit)": { "main": [[{ "node": "Format Rejection (allowlist/limit)", "type": "main", "index": 0 }]] },
+    "Re-read Policy (checkpoint 3)": { "main": [[{ "node": "IF Frozen (checkpoint 3)", "type": "main", "index": 0 }]] },
+    "IF Frozen (checkpoint 3)": {
+      "main": [
+        [{ "node": "Log REJECTED (frozen at checkpoint 3)", "type": "main", "index": 0 }],
+        [{ "node": "Execute Workflow D (Payment Executor)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log REJECTED (frozen at checkpoint 3)": { "main": [[{ "node": "Format Rejection (frozen 3)", "type": "main", "index": 0 }]] },
+    "Execute Workflow D (Payment Executor)": { "main": [[{ "node": "IF Executor Succeeded", "type": "main", "index": 0 }]] },
+    "IF Executor Succeeded": {
+      "main": [
+        [{ "node": "Increment spent_today", "type": "main", "index": 0 }],
+        [{ "node": "Log REJECTED (executor failed)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Increment spent_today": { "main": [[{ "node": "Log APPROVED", "type": "main", "index": 0 }]] },
+    "Log APPROVED": { "main": [[{ "node": "Format Approval", "type": "main", "index": 0 }]] },
+    "Log REJECTED (executor failed)": { "main": [[{ "node": "Format Rejection (executor)", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": {
+    "description": "The single source of truth for every payment decision. Re-derives is_frozen, allowlist membership, and daily-limit state directly from Supabase (never trusts caller-supplied values - see decisions.md ADR-002). Only this workflow may call Workflow D."
+  }
+}
