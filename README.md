@@ -16,7 +16,6 @@
 
 - 🚀 **Live Deployed Link:** https://paypilot-killswitch.vercel.app/
 - 🎥 **Demo Video:** https://drive.google.com/drive/folders/1hA-0RnG7-VepQRYmuCXBctR3cBdzkVrP?usp=sharing
-- 📂 **GitHub Repository:** https://github.com/MeetRaval8983/PayPilot
 
 ---
 
