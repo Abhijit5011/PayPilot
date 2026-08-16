@@ -67,7 +67,7 @@ The only trusted layer with Stripe credentials, responsible for final validation
 <p align="center">
   <strong>AI Intent → Deterministic Authorization → Secure Payment Execution</strong>
 </p>
-<img src="./architecture-paypilot.png" alt="PayPilot Architecture" width="100%">  
+
 
 <li>
   <strong>Tech Stack:</strong>
